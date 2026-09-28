@@ -37,6 +37,9 @@ PROVIDER_OPENROUTER = "openrouter"
 # --- Blue Team (LOCKED) ---
 BLUE_PROVIDER = PROVIDER_OPENROUTER
 BLUE_MODEL = "liquid/lfm-2.5-2.6b"
+# OpenRouter only serves this model via its ":free" route now; the plain id
+# returns 404 "No endpoints found". Same model — only the routing id differs.
+BLUE_OPENROUTER_ROUTE = f"{BLUE_MODEL}:free"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_OPENROUTER_MODEL = BLUE_MODEL  # alias
 
@@ -108,6 +111,11 @@ def get_blue_model() -> str:
     return BLUE_MODEL
 
 
+def get_blue_api_model() -> str:
+    """Model id sent to the OpenRouter API for Blue (see BLUE_OPENROUTER_ROUTE)."""
+    return BLUE_OPENROUTER_ROUTE
+
+
 def get_openrouter_api_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
@@ -120,6 +128,11 @@ def blue_client_kwargs() -> dict:
             os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
             or OPENROUTER_BASE_URL
         ),
+        # The ":free" route shares an upstream rate-limit pool and returns
+        # 429 with Retry-After: 1 under load; the SDK backs off and retries.
+        "max_retries": 8,
+        # SDK default is 600s per attempt — one stalled request froze the suite
+        "timeout": 60,
     }
 
 

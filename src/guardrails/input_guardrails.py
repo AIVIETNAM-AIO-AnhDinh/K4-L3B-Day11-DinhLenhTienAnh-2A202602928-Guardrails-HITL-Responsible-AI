@@ -11,6 +11,7 @@ Status convention (không dùng True/False mơ hồ):
 from __future__ import annotations
 
 import re
+import unicodedata
 from typing import Literal
 
 from google.genai import types
@@ -42,6 +43,50 @@ InputStatus = Literal["ALLOW", "BLOCK"]
 # Regex is one signal, not the whole security boundary.
 # ============================================================
 
+def _normalize(text: str) -> str:
+    """Canonicalize text before policy checks.
+
+    - NFKC folds full-width / compatibility forms (e.g. ``ｉｇｎｏｒｅ`` -> ``ignore``)
+    - drops invisible format chars (zero-width space/joiner, BOM, word joiner, ...)
+    - strips Vietnamese diacritics so ``tài khoản`` matches ``tai khoan``
+    - casefolds and collapses whitespace
+    """
+    text = unicodedata.normalize("NFKC", text or "")
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Cf")
+    text = unicodedata.normalize("NFD", text)
+    text = "".join(ch for ch in text if unicodedata.category(ch) != "Mn")
+    text = text.replace("đ", "d").replace("Đ", "D")
+    return re.sub(r"\s+", " ", text).casefold().strip()
+
+
+INJECTION_PATTERNS = [
+    r"\bignore\s+(all\s+)?((the|your)\s+)?(previous|above|prior|earlier)?\s*(instructions?|rules?|directives?)",
+    r"\bdisregard\s+(all\s+)?((the|your)\s+)?(previous|above|prior)?\s*(instructions?|rules?|directives?)",
+    r"\bforget\s+(all\s+)?(your\s+)?(previous\s+)?(instructions?|rules?|prompt)",
+    r"\byou\s+are\s+now\b",
+    r"\b(system|developer)\s+prompt\b",
+    r"\breveal\s+(me\s+)?(your\s+)?(system\s+)?(instructions?|prompt|rules?)",
+    r"\bpretend\s+(that\s+)?(you\s+are|to\s+be)\b",
+    r"\bact\s+as\s+(a\s+|an\s+)?(unrestricted|unfiltered|jailbroken|evil)",
+    r"\b(dan|developer)\s+mode\b|\bdo\s+anything\s+now\b",
+    r"\boverride\s+(your\s+)?(system\s+)?(prompt|instructions?|rules?|safety)",
+    # Vietnamese (matched after diacritics are stripped)
+    r"\bbo\s+qua\s+(moi\s+|tat\s+ca\s+)?(cac\s+)?(huong\s+dan|chi\s+dan|quy\s+tac)",
+    r"\btiet\s+lo\s+(mat\s+khau|api|system\s*prompt|thong\s+tin\s+noi\s+bo)",
+]
+
+# Second signal: phrases with all separators removed, which catches spacing and
+# punctuation obfuscation such as "i.g.n.o.r.e all previous instructions".
+_COMPACT_INJECTION_MARKERS = (
+    "ignoreallpreviousinstructions",
+    "ignorepreviousinstructions",
+    "ignoreallinstructions",
+    "systemprompt",
+    "revealyourinstructions",
+    "revealyourprompt",
+)
+
+
 def detect_injection(user_input: str) -> InputStatus:
     """Detect prompt injection patterns in user input.
 
@@ -51,15 +96,16 @@ def detect_injection(user_input: str) -> InputStatus:
     Returns:
         ``"BLOCK"`` if injection detected (chặn), ``"ALLOW"`` otherwise (cho qua).
     """
-    INJECTION_PATTERNS = [
-        # TODO: Add at least 5 regex patterns
-        # Example:
-        # r"ignore (all )?(previous|above) instructions",
-    ]
+    normalized = _normalize(user_input)
 
     for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, user_input, re.IGNORECASE):
+        if re.search(pattern, normalized):
             return "BLOCK"
+
+    compact = re.sub(r"[^a-z0-9]", "", normalized)
+    if any(marker in compact for marker in _COMPACT_INJECTION_MARKERS):
+        return "BLOCK"
+
     return "ALLOW"
 
 
@@ -84,14 +130,17 @@ def topic_filter(user_input: str) -> InputStatus:
         ``"BLOCK"`` = chặn (off-topic hoặc topic cấm).
         ``"ALLOW"`` = cho qua (câu banking hợp lệ).
     """
-    input_lower = user_input.lower()
+    input_lower = _normalize(user_input)
 
-    # TODO: Implement logic:
-    # 1. If input contains any blocked topic -> return "BLOCK"
-    # 2. If input doesn't contain any allowed topic -> return "BLOCK"
-    # 3. Otherwise -> return "ALLOW"
+    def mentions(topic: str) -> bool:
+        # Leading word boundary so "kill" doesn't hit "skill", "atm" doesn't hit "treatment"
+        return re.search(r"\b" + re.escape(_normalize(topic)), input_lower) is not None
 
-    pass  # Replace with your implementation
+    if any(mentions(topic) for topic in BLOCKED_TOPICS):
+        return "BLOCK"
+    if not any(mentions(topic) for topic in ALLOWED_TOPICS):
+        return "BLOCK"
+    return "ALLOW"
 
 
 # ============================================================
@@ -144,14 +193,22 @@ class InputGuardrailPlugin(base_plugin.BasePlugin):
         self.total_count += 1
         text = self._extract_text(user_message)
 
-        # TODO: Implement logic:
-        # 1. Call detect_injection(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 2. Call topic_filter(text)
-        #    - If "BLOCK": increment blocked_count, return self._block_response("...")
-        # 3. If both return "ALLOW": return None (let message through)
+        if detect_injection(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "I can't follow instructions that try to change my rules or reveal "
+                "internal configuration. I'm happy to help with your VinBank "
+                "account, transfers, savings, loans or credit cards."
+            )
 
-        pass  # Replace with your implementation
+        if topic_filter(text) == "BLOCK":
+            self.blocked_count += 1
+            return self._block_response(
+                "Sorry, I can only help with VinBank banking topics such as accounts, "
+                "transactions, savings and interest rates, loans, and credit cards."
+            )
+
+        return None
 
 
 # ============================================================

@@ -12,6 +12,8 @@ from google.adk.agents import llm_agent
 from google.adk import runners
 from google.adk.plugins import base_plugin
 
+from core.config import DEMO_SECRETS
+from core.openai_runtime import create_blue_pair
 from core.utils import chat_with_agent
 
 
@@ -41,16 +43,24 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        # VN mobile/landline: 0xxxxxxxxx(x) or +84..., optional space/dot/dash separators.
+        # Word boundaries keep it off 12-digit CCCD numbers.
+        "phone": r"(?:\+84|\b0)(?:[\s.-]?\d){9,10}\b",
+        "email": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}",
+        # CMND (9 digits) / CCCD (12 digits)
+        "national_id": r"\b\d{9}\b|\b\d{12}\b",
+        "api_key": r"\bsk-[a-zA-Z0-9-]+",
+        # "password=x", "password: x", "password is x", "mật khẩu: x"
+        "password": r"(?:password|passwd|pwd|mật\s*khẩu)\s*(?:[:=]|\bis\b|\blà\b)\s*[^\s,;]+",
+        "internal_host": r"\b[\w.-]+\.internal(?::\d+)?\b",
+        # Known lab secrets that slipped through without a "password is" prefix
+        "secret": "|".join(re.escape(s) for s in DEMO_SECRETS) or r"(?!x)x",
     }
 
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
+        # Match against the progressively redacted text so one value isn't
+        # counted twice (e.g. admin123 as both "password" and "secret").
+        matches = re.findall(pattern, redacted, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
@@ -89,15 +99,16 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-3.5-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+# Blue Team guardrails are locked to OpenRouter (core.config), so the judge
+# runs on the same Blue model via the OpenAI-compatible runtime instead of a
+# Gemini LlmAgent. Creating the pair makes no network call; the judge stays
+# inactive until _init_judge() wires up judge_runner.
+safety_judge_agent, _safety_judge_runner = create_blue_pair(
+    name="safety_judge",
+    instruction=SAFETY_JUDGE_INSTRUCTION,
+    app_name="safety_judge",
+    temperature=0.0,
+)
 judge_runner = None
 
 
@@ -105,9 +116,7 @@ def _init_judge():
     """Initialize the judge agent and runner (call after creating the agent)."""
     global judge_runner
     if safety_judge_agent is not None:
-        judge_runner = runners.InMemoryRunner(
-            agent=safety_judge_agent, app_name="safety_judge"
-        )
+        judge_runner = _safety_judge_runner
 
 
 async def llm_safety_check(response_text: str) -> dict:
@@ -172,16 +181,26 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        filtered = content_filter(response_text)
+        if not filtered["safe"]:
+            response_text = filtered["redacted"]
+            llm_response.content = self._text_content(response_text)
+            self.redacted_count += 1
 
-        return llm_response  # TODO: modify if needed
+        if self.use_llm_judge:
+            # Judge what the user would actually receive (post-redaction)
+            judgement = await llm_safety_check(response_text)
+            if not judgement["safe"]:
+                llm_response.content = self._text_content(
+                    "I'm sorry, I can't share that. I can help with your VinBank "
+                    "account, transactions, savings, loans or credit cards."
+                )
+                self.blocked_count += 1
+
+        return llm_response
+
+    def _text_content(self, text: str) -> types.Content:
+        return types.Content(role="model", parts=[types.Part.from_text(text=text)])
 
 
 # ============================================================

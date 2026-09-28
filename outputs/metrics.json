@@ -1,0 +1,15 @@
+{
+  "total_requests": 34,
+  "blocked_requests": 15,
+  "block_rate": 0.4411764705882353,
+  "rate_limit_hits": 5,
+  "judge_checks": 0,
+  "judge_fails": 0,
+  "judge_fail_rate": 0.0,
+  "alerts": [],
+  "thresholds": {
+    "block_rate": 0.5,
+    "rate_limit_hits": 5,
+    "judge_fail_rate": 0.3
+  }
+}

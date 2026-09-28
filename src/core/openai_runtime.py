@@ -14,7 +14,7 @@ from typing import Any, Callable
 from core.config import (
     get_red_model,
     get_red_provider,
-    get_blue_model,
+    get_blue_api_model,
     get_blue_provider,
     blue_client_kwargs,
     red_openai_client_kwargs,
@@ -196,7 +196,7 @@ def create_blue_pair(
         name=name,
         instruction=instruction,
         app_name=app_name,
-        model=get_blue_model(),
+        model=get_blue_api_model(),
         provider=get_blue_provider(),
         client_kwargs=blue_client_kwargs(),
         plugins=plugins,
